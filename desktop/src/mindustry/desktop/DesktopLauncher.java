@@ -3,26 +3,32 @@ package mindustry.desktop;
 import arc.*;
 import arc.Files.*;
 import arc.backend.sdl.*;
-import arc.backend.sdl.jni.*;
 import arc.discord.*;
 import arc.discord.DiscordRPC.*;
 import arc.files.*;
+import arc.func.*;
 import arc.math.*;
+import arc.profiling.*;
 import arc.struct.*;
 import arc.util.*;
 import arc.util.Log.*;
 import arc.util.serialization.*;
 import com.codedisaster.steamworks.*;
 import mindustry.*;
-import mindustry.core.*;
+import mindustry.core.Version;
 import mindustry.desktop.steam.*;
 import mindustry.game.EventType.*;
 import mindustry.gen.*;
+import mindustry.graphics.*;
 import mindustry.mod.Mods.*;
 import mindustry.net.*;
 import mindustry.net.Net.*;
 import mindustry.service.*;
 import mindustry.type.*;
+import mindustry.ui.dialogs.*;
+import org.lwjgl.*;
+import org.lwjgl.sdl.*;
+import org.lwjgl.system.*;
 
 import java.io.*;
 
@@ -31,38 +37,70 @@ import static mindustry.Vars.*;
 public class DesktopLauncher extends ClientLauncher{
     public final static long discordID = 610508934456934412L;
     public final String[] args;
-    
+
     boolean useDiscord = !OS.hasProp("nodiscord"), loadError = false;
     Throwable steamError;
 
     public static void main(String[] arg){
         try{
             Vars.loadLogger();
+
             new SdlApplication(new DesktopLauncher(arg), new SdlConfig(){{
                 title = "Mindustry";
                 maximized = true;
+                coreProfile = true;
                 width = 900;
                 height = 700;
-                gl30Minor = 2;
-                gl30 = true;
+
+                //on Windows, Intel drivers might be buggy with OpenGL 3.x, so only use 2.x. See https://github.com/Anuken/Mindustry/issues/11041
+                if(IntelGpuCheck.wasIntel()){
+                    allowGl30 = false;
+                    coreProfile = false;
+                    glVersions = new int[][]{{2, 1}, {2, 0}};
+                }else if(OS.isMac){
+                    //MacOS supports 4.1 at most
+                    glVersions = new int[][]{{4, 1}, {3, 2}, {2, 1}, {2, 0}};
+                }else{
+                    //try essentially every OpenGL version
+                    glVersions = new int[][]{{4, 6}, {4, 5}, {4, 4}, {4, 1}, {3, 3}, {3, 2}, {3, 1}, {2, 1}, {2, 0}};
+                }
+
                 for(int i = 0; i < arg.length; i++){
                     if(arg[i].charAt(0) == '-'){
                         String name = arg[i].substring(1);
-                        try{
-                            switch(name){
-                                case "width": width = Strings.parseInt(arg[i + 1], width); break;
-                                case "height": height = Strings.parseInt(arg[i + 1], height); break;
-                                case "glMajor": gl30Major = Strings.parseInt(arg[i + 1], gl30Major);
-                                case "glMinor": gl30Minor = Strings.parseInt(arg[i + 1], gl30Minor);
-                                case "gl3": gl30 = true; break;
-                                case "gl2": gl30 = false; break;
-                                case "coreGl": coreProfile = true; break;
-                                case "antialias": samples = 16; break;
-                                case "debug": Log.level = LogLevel.debug; break;
-                                case "maximized": maximized = Boolean.parseBoolean(arg[i + 1]); break;
+                        switch(name){
+                            case "width" -> width = Strings.parseInt(arg[i + 1], width);
+                            case "height" -> height = Strings.parseInt(arg[i + 1], height);
+                            case "gl" -> {
+                                String str = arg[i + 1];
+                                if(str.contains(".")){
+                                    String[] split = str.split("\\.");
+                                    if(split.length == 2 && Strings.canParsePositiveInt(split[0]) && Strings.canParsePositiveInt(split[1])){
+                                        glVersions = new int[][]{{Strings.parseInt(split[0]), Strings.parseInt(split[1])}};
+                                        allowGl30 = true; //when a version is explicitly specified always allow GL 3
+                                        break;
+                                    }
+                                }
+                                Log.err("Invalid GL version format string: '@'. GL version must be of the form <major>.<minor>", str);
                             }
-                        }catch(NumberFormatException number){
-                            Log.warn("Invalid parameter number value.");
+                            case "coreGl" -> coreProfile = true;
+                            case "compatibilityGl" -> coreProfile = false;
+                            case "antialias" -> samples = 16;
+                            case "debug" -> Log.level = LogLevel.debug;
+                            case "maximized" -> maximized = Boolean.parseBoolean(arg[i + 1]);
+                            case "testMobile" -> testMobile = true;
+                            case "gltrace" -> {
+                                Events.on(ClientCreateEvent.class, e -> {
+                                    var profiler = new GLProfiler(Core.graphics);
+                                    profiler.enable();
+                                    Core.app.addListener(new ApplicationListener(){
+                                        @Override
+                                        public void update(){
+                                            profiler.reset();
+                                        }
+                                    });
+                                });
+                            }
                         }
                     }
                 }
@@ -75,23 +113,24 @@ public class DesktopLauncher extends ClientLauncher{
 
     public DesktopLauncher(String[] args){
         this.args = args;
-        
+
         Version.init();
         boolean useSteam = Version.modifier.contains("steam");
-        testMobile = Seq.with(args).contains("-testMobile");
 
         if(useDiscord){
-            try{
-                DiscordRPC.connect(discordID);
-                Log.info("Initialized Discord rich presence.");
-                Runtime.getRuntime().addShutdownHook(new Thread(DiscordRPC::close));
-            }catch(NoDiscordClientException none){
-                //don't log if no client is found
-                useDiscord = false;
-            }catch(Throwable t){
-                useDiscord = false;
-                Log.warn("Failed to initialize Discord RPC - you are likely using a JVM <16.");
-            }
+            Threads.daemon(() -> {
+                try{
+                    DiscordRPC.connect(discordID);
+                    Log.info("Initialized Discord rich presence.");
+                    Runtime.getRuntime().addShutdownHook(new Thread(DiscordRPC::close));
+                }catch(NoDiscordClientException none){
+                    //don't log if no client is found
+                    useDiscord = false;
+                }catch(Throwable t){
+                    useDiscord = false;
+                    Log.warn("Failed to initialize Discord RPC - you are likely using a JVM <16.");
+                }
+            });
         }
 
         if(useSteam){
@@ -258,6 +297,65 @@ public class DesktopLauncher extends ClientLauncher{
     }
 
     @Override
+    public void showFileChooser(boolean open, String title, String extension, Cons<Fi> cons){
+        showNativeFileChooser(open, cons, extension);
+    }
+
+    @Override
+    public void showMultiFileChooser(Cons<Fi> cons, String... extensions){
+        showNativeFileChooser(true, cons, extensions);
+    }
+
+    void showNativeFileChooser(boolean open, Cons<Fi> cons, String... shownExtensions){
+        String[] ext = shownExtensions == null || shownExtensions.length == 0 ? new String[]{""} : shownExtensions;
+
+        SDL_DialogFileFilter.Buffer filters = SDL_DialogFileFilter.calloc(ext.length);
+        try(MemoryStack stack = MemoryStack.stackPush()){
+            for(int i = 0; i < ext.length; i++){
+                String extName = ext[i];
+
+                var filter = SDL_DialogFileFilter.calloc(stack)
+                .name(MemoryUtil.memUTF8(extName.isEmpty() ? "All Files" : "." + extName + " files"))
+                .pattern(MemoryUtil.memUTF8(extName.isEmpty() ? "*" : extName));
+
+                filters.put(i, filter);
+            }
+        }
+        SDL_DialogFileCallbackI callback = (userData, files, filter) -> {
+            if(files != 0){
+                PointerBuffer pointerBuffer = MemoryUtil.memPointerBuffer(files, 1);
+                long firstFile = pointerBuffer.get();
+                if(firstFile != 0){
+                    String result = MemoryUtil.memUTF8(firstFile);
+
+                    if(result.isEmpty() || result.equals("\n")) return;
+                    if(result.endsWith("\n")) result = result.substring(0, result.length() - 1);
+                    if(result.contains("\n")) return;
+
+                    Fi file = Core.files.absolute(result);
+                    Core.app.post(() -> {
+                        FileChooser.setLastDirectory(file.isDirectory() ? file : file.parent());
+
+                        if(!open){
+                            cons.get(file.parent().child(file.nameWithoutExtension() + "." + ext[0]));
+                        }else{
+                            cons.get(file);
+                        }
+                    });
+                }
+            }
+        };
+
+        if(open){
+            SDLDialog.SDL_ShowOpenFileDialog(callback, 0, ((SdlApplication)Core.app).getWindow(), filters, FileChooser.getLastDirectory().absolutePath(), false);
+        }else{
+            SDLDialog.SDL_ShowSaveFileDialog(callback, 0, ((SdlApplication)Core.app).getWindow(), filters, FileChooser.getLastDirectory().absolutePath() + "/" + "export." + ext[0]);
+        }
+
+        filters.free();
+    }
+
+    @Override
     public Seq<Fi> getWorkshopContent(Class<? extends Publishable> type){
         return !steam ? super.getWorkshopContent(type) : SVars.workshop.getWorkshopFiles(type);
     }
@@ -379,6 +477,6 @@ public class DesktopLauncher extends ClientLauncher{
     }
 
     private static void message(String message){
-        SDL.SDL_ShowSimpleMessageBox(SDL.SDL_MESSAGEBOX_ERROR, "oh no", message);
+        SDLMessageBox.SDL_ShowSimpleMessageBox(SDLMessageBox.SDL_MESSAGEBOX_ERROR, "oh no", message, 0);
     }
 }

@@ -40,7 +40,8 @@ public enum LAccess{
     cameraHeight,
     displayWidth,
     displayHeight,
-    bufferUsage,
+    bufferSize,
+    operations,
     size,
     solid,
     dead,
@@ -50,6 +51,10 @@ public enum LAccess{
     mineX,
     mineY,
     mining,
+    buildX,
+    buildY,
+    building,
+    breaking,
     speed,
     team,
     type,
@@ -61,7 +66,10 @@ public enum LAccess{
     payloadType,
     totalPayload,
     payloadCapacity,
+    maxUnits,
     id,
+    selectedBlock,
+    selectedRotation,
 
     //values with parameters are considered controllable
     enabled("to"), //"to" is standard for single parameter access

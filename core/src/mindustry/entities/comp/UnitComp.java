@@ -35,7 +35,7 @@ import static mindustry.logic.GlobalVars.*;
 @Component(base = true)
 abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, Itemsc, Rotc, Unitc, Weaponsc, Drawc, Syncc, Shieldc, Displayable, Ranged, Minerc, Builderc, Senseable, Settable{
     private static final Vec2 tmp1 = new Vec2(), tmp2 = new Vec2();
-    static final float warpDst = 16f;
+    static final float warpDst = 8f;
 
     @Import boolean dead, disarmed;
     @Import float x, y, rotation, maxHealth, drag, armor, hitSize, health, shield, ammo, dragMultiplier, armorOverride, speedMultiplier;
@@ -102,7 +102,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
 
     public float floorSpeedMultiplier(){
         Floor on = isFlying() || type.hovering ? Blocks.air.asFloor() : floorOn();
-        return on.speedMultiplier * speedMultiplier;
+        return (float)Math.pow(on.speedMultiplier, type.floorMultiplier) * speedMultiplier;
     }
 
     /** Called when this unit was unloaded from a factory or spawn point. */
@@ -113,7 +113,8 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
     public void updateBoosting(boolean boost){
         if(!type.canBoost || dead) return;
 
-        elevation = Mathf.approachDelta(elevation, type.canBoost ? Mathf.num(boost || onSolid() || (isFlying() && !canLand())) : 0f, type.riseSpeed);
+        boolean shouldBoost = boost || onSolid() || (isFlying() && !canLand());
+        elevation = Mathf.approachDelta(elevation, type.canBoost ? Mathf.num(shouldBoost) : 0f, shouldBoost ? type.riseSpeed : type.descentSpeed);
     }
 
     /** Move based on preferred unit movement type. */
@@ -275,6 +276,8 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
             case mining -> mining() ? 1 : 0;
             case mineX -> mining() ? mineTile.x : -1;
             case mineY -> mining() ? mineTile.y : -1;
+            case buildX -> isBuilding() ? buildPlan().x : -1;
+            case buildY -> isBuilding() ? buildPlan().y : -1;
             case armor -> armorOverride >= 0f ? armorOverride : armor;
             case flag -> flag;
             case speed -> type.speed * 60f / tilesize * speedMultiplier;
@@ -288,6 +291,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
             case payloadCapacity -> type.payloadCapacity / tilePayload;
             case size -> hitSize / tilesize;
             case color -> Color.toDoubleBits(team.color.r, team.color.g, team.color.b, 1f);
+            case selectedRotation -> controller instanceof Player p ? p.selectedRotation : 0;
             default -> Float.NaN;
         };
     }
@@ -303,6 +307,9 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
                 (pay.payloads().isEmpty() ? null :
                 pay.payloads().peek() instanceof UnitPayload p1 ? p1.unit.type :
                 pay.payloads().peek() instanceof BuildPayload p2 ? p2.block() : null) : null;
+            case building -> isBuilding() && !buildPlan().breaking ? buildPlan().tile().build : null;
+            case breaking -> isBuilding() && buildPlan().breaking ? buildPlan().tile().build : null;
+            case selectedBlock -> controller instanceof Player p ? p.selectedBlock : null;
             default -> noSensed;
         };
     }
@@ -532,6 +539,10 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
         return type.targetable(self(), targeter);
     }
 
+    public boolean killable(){
+        return type.killable(self());
+    }
+
     public boolean hittable(){
         return type.hittable(self());
     }
@@ -602,7 +613,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
 
         if(floor != null && floor.isLiquid && floor.drownTime > 0 && canDrown()){
             lastDrownFloor = floor;
-            drownTime += Time.delta / floor.drownTime / type.drownTimeMultiplier;
+            drownTime += Time.delta / (hitSize / 8f * type.drownTimeMultiplier * floor.drownTime);
             if(Mathf.chanceDelta(0.05f)){
                 floor.drownUpdateEffect.at(x, y, hitSize, floor.mapColor);
             }
@@ -643,8 +654,8 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
                 //repel unit out of bounds
                 if(x < left) dx += (-(x - left)/warpDst);
                 if(y < bot) dy += (-(y - bot)/warpDst);
-                if(x > right) dx -= (x - right)/warpDst;
-                if(y > top) dy -= (y - top)/warpDst;
+                if(x > right - tilesize) dx -= (x - (right - tilesize))/warpDst;
+                if(y > top - tilesize) dy -= (y - (top - tilesize))/warpDst;
 
                 velAddNet(dx * Time.delta, dy * Time.delta);
                 float margin = tilesize * 1f;
@@ -672,7 +683,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
         if(isFlying() != wasFlying){
             if(wasFlying){
                 if(tile != null){
-                    Fx.unitLand.at(x, y, floor.isLiquid ? 1f : 0.5f, tile.floor().mapColor);
+                    Fx.unitLand.at(x, y, floor.isLiquid ? 1f : 0.5f, tile.getFloorColor());
                 }
             }
 
@@ -681,7 +692,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
 
         if(!type.hovering && isGrounded() && type.emitWalkEffect){
             if((splashTimer += Mathf.dst(deltaX(), deltaY())) >= (7f + hitSize()/8f)){
-                floor.walkEffect.at(x, y, hitSize() / 8f, floor.mapColor);
+                floor.walkEffect.at(x, y, hitSize() / 8f, tile != null ? tile.getFloorColor() : floor.mapColor);
                 splashTimer = 0f;
 
                 if(type.emitWalkSound){
@@ -703,8 +714,13 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
             kill();
         }
 
-        if(!headless && type.loopSound != Sounds.none){
+        if(!headless){
             control.sound.loop(type.loopSound, this, type.loopSoundVolume);
+            if(type.moveSound != Sounds.none){
+                float progress = Mathf.clamp(vel.len() / type.speed);
+                float pitch = Mathf.lerp(type.moveSoundPitchMin,  type.moveSoundPitchMax, progress);
+                control.sound.loop(type.moveSound, this, type.moveSoundVolume * progress, pitch);
+            }
         }
 
         //check if environment is unsupported
@@ -832,7 +848,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
 
     /** Actually destroys the unit, removing it and creating explosions. **/
     public void destroy(){
-        if(!isAdded() || !type.killable) return;
+        if(!isAdded() || !killable()) return;
 
         float explosiveness = 2f + item().explosiveness * stack().amount * 1.53f;
         float flammability = item().flammability * stack().amount / 1.9f;
@@ -850,7 +866,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
             Effect.scorch(x, y, (int)(hitSize / 5));
         }
         Effect.shake(shake, shake, this);
-        type.deathSound.at(this);
+        type.deathSound.at(this, 1f, type.deathSoundVolume);
 
         Events.fire(new UnitDestroyEvent(self()));
 
@@ -931,13 +947,15 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
         //don't waste time when the unit is already on the ground, just destroy it
         if(!type.flying || !type.createWreck){
             destroy();
+        }else{
+           type.wreckSound.at(this, 1f, type.wreckSoundVolume);
         }
     }
 
     @Override
     @Replace
     public void kill(){
-        if(dead || net.client() || !type.killable) return;
+        if(dead || net.client() || !killable()) return;
 
         //deaths are synced; this calls killed()
         Call.unitDeath(id);
